@@ -3,31 +3,31 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PHP-WASM Web Server</title>
+  <title>PHP-WASM Server</title>
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #fff; font-family: sans-serif; }
-    
-    /* লোডিং ও এরর বার */
+    html, body { margin: 0; padding: 0; height: 100%; background: #f4f4f5; font-family: system-ui, sans-serif; }
     #status-bar {
       position: fixed;
       top: 0; left: 0; right: 0;
-      background: #4f46e5;
-      color: white;
-      padding: 6px 16px;
+      height: 35px;
+      background: #18181b;
+      color: #fafafa;
+      padding: 0 16px;
       font-size: 13px;
       display: flex;
+      align-items: center;
       justify-content: space-between;
       z-index: 9999;
+      border-bottom: 1px solid #27272a;
     }
-    
-    /* রেন্ডার করা আউটপুট দেখানোর ফ্রেম */
     #viewport {
       width: 100%;
-      height: 100%;
+      height: calc(100% - 35px);
+      margin-top: 35px;
       border: none;
       display: block;
-      margin-top: 30px; /* status-bar এর জন্য জায়গা */
+      background: #ffffff;
     }
   </style>
 </head>
@@ -35,7 +35,7 @@
 
   <div id="status-bar">
     <span id="status-text">⏳ PHP Engine চালু হচ্ছে...</span>
-    <span id="current-file">htdocs/index.php</span>
+    <span id="current-file" style="color: #a1a1aa;">htdocs/index.php</span>
   </div>
 
   <iframe id="viewport"></iframe>
@@ -43,8 +43,7 @@
   <script type="module">
     import { PhpWeb } from 'https://cdn.jsdelivr.net/npm/php-wasm/PhpWeb.mjs';
 
-    // আপনার htdocs ফোল্ডারের ফাইলগুলোর তালিকা
-    // (GitHub যেহেতু স্ট্যাটিক, তাই include/require কাজ করতে ফাইলগুলোর নাম এখানে উল্লেখ রাখুন)
+    // htdocs ফোল্ডারের ফাইলগুলোর তালিকা
     const HTDOCS_FILES = [
       'index.php',
       'about.php',
@@ -56,107 +55,115 @@
     const currentFile = document.getElementById('current-file');
     const viewport = document.getElementById('viewport');
 
-    // ১. PHP ইনিশিয়ালাইজ ও htdocs ফাইল লোড
-    async function startServer() {
+    async function initServer() {
       try {
+        statusText.textContent = '📥 PHP Runtime ডাউনলোড ও চালু হচ্ছে...';
         php = new PhpWeb();
-        statusText.textContent = '📥 ফাইলগুলো মেমোরিতে লোড হচ্ছে...';
 
-        // htdocs ডিরেক্টরি তৈরি
-        await php.run(`<?php @mkdir('/htdocs', 0777, true); ?>`);
+        // 1. ভার্চুয়াল ফোল্ডার তৈরি
+        try {
+          await php.mkdir('/htdocs');
+        } catch(e) {
+          // ফোল্ডার আগে থেকে থাকলে ইগনোর করবে
+        }
 
-        // GitHub থেকে htdocs এর ফাইলগুলো ফেচ করে WASM ভার্চুয়াল মেমোরিতে রাইট করা
+        // 2. GitHub থেকে htdocs এর ফাইলগুলো ফেচ করে সরাসরি WASM মেমোরিতে রাইট করা
+        statusText.textContent = '📥 htdocs ফাইল লোড হচ্ছে...';
         for (const file of HTDOCS_FILES) {
           try {
-            const res = await fetch(`./htdocs/${file}?v=${Date.now()}`);
+            const res = await fetch(`./htdocs/${file}?nocache=${Date.now()}`);
             if (res.ok) {
               const code = await res.text();
-              // ফাইল ভার্চুয়াল স্টোরেজে সেভ করা
-              await php.run(`<?php file_put_contents('/htdocs/${file}', base64_decode('${btoa(code)}')); ?>`);
+              // php.writeFile ব্যবহার করায় বাংলা বা ইউনিকোড ক্র্যাশ করবে না
+              await php.writeFile(`/htdocs/${file}`, code);
+              console.log(`[Loaded]: /htdocs/${file}`);
+            } else {
+              console.warn(`[Not Found on GitHub]: htdocs/${file} (HTTP ${res.status})`);
             }
           } catch (e) {
-            console.warn(`File ./htdocs/${file} লোড করা যায়নি`);
+            console.error(`Fetch error for ${file}:`, e);
           }
         }
 
-        statusText.textContent = '🟢 PHP Server Running';
-        statusText.style.background = '#16a34a';
+        statusText.textContent = '🟢 Server Running';
+        statusText.style.color = '#4ade80';
 
-        // URL থেকে দেখে নেওয়া কোন পেজে যেতে হবে (যেমন: ?page=about.php)
+        // URL থেকে প্যারামিটার রিড করা (?page=about.php)
         const urlParams = new URLSearchParams(window.location.search);
         const targetPage = urlParams.get('page') || 'index.php';
-        await renderPage(targetPage);
+        await executePHP(targetPage);
 
       } catch (err) {
-        statusText.textContent = '❌ Error: ' + err.message;
-        statusText.style.background = '#dc2626';
+        statusText.textContent = '❌ Boot Error: ' + err.message;
+        statusText.style.color = '#f87171';
+        console.error(err);
       }
     }
 
-    // ২. নির্দিষ্ট PHP ফাইল এক্সিকিউট করে স্ক্রিনে দেখানো
-    async function renderPage(filename) {
+    async function executePHP(filename) {
       currentFile.textContent = `htdocs/${filename}`;
-      let outputBuffer = '';
+      let outputHTML = '';
 
-      // আউটপুট ক্যাপচার করা
-      const handleOutput = (event) => {
-        const chunk = Array.isArray(event.detail) ? event.detail.join('') : event.detail;
-        outputBuffer += chunk;
+      // আউটপুট রিসিভ করা
+      const onOutput = (event) => {
+        const text = Array.isArray(event.detail) ? event.detail.join('') : event.detail;
+        outputHTML += text;
       };
 
-      php.addEventListener('output', handleOutput);
+      php.addEventListener('output', onOutput);
 
       try {
-        // রিকোয়েস্ট মেথড এবং পাথ সেট করে এক্সিকিউট করা
-        const runnerScript = `<?php
+        // ফাইলটি এক্সিকিউট করা
+        const runner = `<?php
           chdir('/htdocs');
           $_SERVER['DOCUMENT_ROOT'] = '/htdocs';
-          $_SERVER['SCRIPT_NAME'] = '/${filename}';
           $_SERVER['REQUEST_METHOD'] = 'GET';
-          
+          $_SERVER['SCRIPT_NAME'] = '/${filename}';
+
           if (file_exists('/htdocs/${filename}')) {
               include '/htdocs/${filename}';
           } else {
-              echo "<h2>404 Not Found</h2><p>File /htdocs/${filename} পাওয়া যায়নি!</p>";
+              echo "<div style='font-family:sans-serif;padding:30px;color:#dc2626;'>";
+              echo "<h2>404 Not Found</h2>";
+              echo "<p>ফাইল <strong>/htdocs/${filename}</strong> খুঁজে পাওয়া যায়নি!</p>";
+              echo "</div>";
           }
         ?>`;
 
-        await php.run(runnerScript);
+        await php.run(runner);
+        viewport.srcdoc = outputHTML;
 
-        // রেন্ডার করা HTML আইফ্রেমের ভিতরে দেওয়া
-        viewport.srcdoc = outputBuffer;
-
-        // আইফ্রেমের ভেতরের সাধারণ লিংকগুলো ইন্টারসেপ্ট করা যেন পেজ রিফ্রেশ ছাড়া পেজ চেঞ্জ হয়
+        // আইফ্রেমের অভ্যন্তরীণ লিংকগুলো ইন্টারসেপ্ট করা
         viewport.onload = () => {
-          const links = viewport.contentWindow.document.querySelectorAll('a');
-          links.forEach(a => {
-            const href = a.getAttribute('href');
-            if (href && !href.startsWith('http') && !href.startsWith('#')) {
-              a.onclick = (e) => {
-                e.preventDefault();
-                // পেজ ব্রাউজারের ইতিহাস এবং URL আপডেট
-                const cleanHref = href.replace(/^\.\//, '');
-                window.history.pushState({}, '', `?page=${cleanHref}`);
-                renderPage(cleanHref);
-              };
-            }
-          });
+          try {
+            const doc = viewport.contentWindow.document;
+            doc.querySelectorAll('a').forEach(a => {
+              const href = a.getAttribute('href');
+              if (href && !href.startsWith('http') && !href.startsWith('#')) {
+                a.onclick = (e) => {
+                  e.preventDefault();
+                  const cleanHref = href.replace(/^\.\//, '');
+                  window.history.pushState({}, '', `?page=${cleanHref}`);
+                  executePHP(cleanHref);
+                };
+              }
+            });
+          } catch(e) {}
         };
 
       } catch (err) {
-        viewport.srcdoc = `<pre style="color: red; padding: 20px;">Execution Error:\n${err.message}</pre>`;
+        viewport.srcdoc = `<pre style="color:red;padding:20px;">Execution Error: ${err.message}</pre>`;
       } finally {
-        php.removeEventListener('output', handleOutput);
+        php.removeEventListener('output', onOutput);
       }
     }
 
-    // ব্রাউজারের ব্যাক/ফরোয়ার্ড বাটনের হ্যান্ডলিং
     window.addEventListener('popstate', () => {
       const urlParams = new URLSearchParams(window.location.search);
-      renderPage(urlParams.get('page') || 'index.php');
+      executePHP(urlParams.get('page') || 'index.php');
     });
 
-    startServer();
+    initServer();
   </script>
 </body>
 </html>
