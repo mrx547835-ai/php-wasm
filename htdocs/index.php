@@ -1,4 +1,18 @@
 <?php
+
+if (!function_exists('curl_init')) {
+    function curl_init($url = null) { return ['url' => $url, 'options' => []]; }
+    function curl_setopt(&$ch, $opt, $val) { $ch['options'][$opt] = $val; }
+    function curl_setopt_array(&$ch, $options) { $ch['options'] = $options; }
+    function curl_exec($ch) {
+        $url = $ch['options'][CURLOPT_URL] ?? $ch['url'];
+        return @file_get_contents($url);
+    }
+    function curl_close($ch) {}
+    function curl_errno($ch) { return 0; }
+    function curl_error($ch) { return ''; }
+    function curl_getinfo($ch, $opt = 0) { return 200; }
+}
 /**
  * Universal KaiDownloader - Server-Rendered PHP Edition
  * Fluid Layout supporting 128x160 QQVGA up to widescreen desktops.
