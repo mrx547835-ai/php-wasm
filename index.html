@@ -34,7 +34,7 @@
 <body>
 
   <div id="status-bar">
-    <span id="status-text">⏳ PHP Engine চালু হচ্ছে...</span>
+    <span id="status-text">⏳ ইনিশিয়ালাইজ হচ্ছে...</span>
     <span id="current-file" style="color: #a1a1aa;">htdocs/index.php</span>
   </div>
 
@@ -43,13 +43,6 @@
   <script type="module">
     import { PhpWeb } from 'https://cdn.jsdelivr.net/npm/php-wasm/PhpWeb.mjs';
 
-    // htdocs ফোল্ডারের ফাইলগুলোর তালিকা
-    const HTDOCS_FILES = [
-      'index.php',
-      'about.php',
-      'header.php'
-    ];
-
     let php;
     const statusText = document.getElementById('status-text');
     const currentFile = document.getElementById('current-file');
@@ -57,38 +50,54 @@
 
     async function initServer() {
       try {
-        statusText.textContent = '📥 PHP Runtime ডাউনলোড ও চালু হচ্ছে...';
+        statusText.textContent = '📥 PHP Runtime ডাউনলোড হচ্ছে...';
         php = new PhpWeb();
 
-        // 1. ভার্চুয়াল ফোল্ডার তৈরি
+        // 1. files.json থেকে ফাইল লিস্ট আনা
+        statusText.textContent = '📋 files.json ফেচ করা হচ্ছে...';
+        let files = [];
         try {
-          await php.mkdir('/htdocs');
-        } catch(e) {
-          // ফোল্ডার আগে থেকে থাকলে ইগনোর করবে
+          const manifestRes = await fetch(`./files.json?nocache=${Date.now()}`);
+          if (manifestRes.ok) {
+            files = await manifestRes.json();
+            console.log("Found files from manifest:", files);
+          } else {
+            throw new Error("files.json পাওয়া যায়নি! ডিফল্ট index.php নেওয়া হচ্ছে।");
+          }
+        } catch (e) {
+          console.warn(e.message);
+          files = ['index.php']; // Fallback
         }
 
-        // 2. GitHub থেকে htdocs এর ফাইলগুলো ফেচ করে সরাসরি WASM মেমোরিতে রাইট করা
-        statusText.textContent = '📥 htdocs ফাইল লোড হচ্ছে...';
-        for (const file of HTDOCS_FILES) {
+        // 2. WASM মেমোরিতে /htdocs ফোল্ডার তৈরি
+        await php.run(`<?php @mkdir('/htdocs', 0777, true); ?>`);
+
+        // 3. সব ফাইল ফেচ করে WASM মেমোরিতে রাইট করা
+        statusText.textContent = '📥 ফাইলগুলো লোড হচ্ছে...';
+        for (const file of files) {
           try {
             const res = await fetch(`./htdocs/${file}?nocache=${Date.now()}`);
             if (res.ok) {
               const code = await res.text();
-              // php.writeFile ব্যবহার করায় বাংলা বা ইউনিকোড ক্র্যাশ করবে না
+              
+              // সাব-ফোল্ডার থাকলে (যেমন: htdocs/includes/header.php) ডিরেক্টরি বানিয়ে নেওয়া
+              if (file.includes('/')) {
+                const subDir = file.substring(0, file.lastIndexOf('/'));
+                await php.run(`<?php @mkdir('/htdocs/${subDir}', 0777, true); ?>`);
+              }
+
               await php.writeFile(`/htdocs/${file}`, code);
-              console.log(`[Loaded]: /htdocs/${file}`);
-            } else {
-              console.warn(`[Not Found on GitHub]: htdocs/${file} (HTTP ${res.status})`);
+              console.log(`[Mounted]: /htdocs/${file}`);
             }
           } catch (e) {
-            console.error(`Fetch error for ${file}:`, e);
+            console.error(`Error loading ${file}:`, e);
           }
         }
 
         statusText.textContent = '🟢 Server Running';
         statusText.style.color = '#4ade80';
 
-        // URL থেকে প্যারামিটার রিড করা (?page=about.php)
+        // URL অনুযায়ী ফাইল রান করা (?page=about.php)
         const urlParams = new URLSearchParams(window.location.search);
         const targetPage = urlParams.get('page') || 'index.php';
         await executePHP(targetPage);
@@ -104,7 +113,6 @@
       currentFile.textContent = `htdocs/${filename}`;
       let outputHTML = '';
 
-      // আউটপুট রিসিভ করা
       const onOutput = (event) => {
         const text = Array.isArray(event.detail) ? event.detail.join('') : event.detail;
         outputHTML += text;
@@ -113,7 +121,6 @@
       php.addEventListener('output', onOutput);
 
       try {
-        // ফাইলটি এক্সিকিউট করা
         const runner = `<?php
           chdir('/htdocs');
           $_SERVER['DOCUMENT_ROOT'] = '/htdocs';
@@ -125,7 +132,7 @@
           } else {
               echo "<div style='font-family:sans-serif;padding:30px;color:#dc2626;'>";
               echo "<h2>404 Not Found</h2>";
-              echo "<p>ফাইল <strong>/htdocs/${filename}</strong> খুঁজে পাওয়া যায়নি!</p>";
+              echo "<p>ফাইল <strong>/htdocs/${filename}</strong> পাওয়া যায়নি!</p>";
               echo "</div>";
           }
         ?>`;
@@ -133,7 +140,7 @@
         await php.run(runner);
         viewport.srcdoc = outputHTML;
 
-        // আইফ্রেমের অভ্যন্তরীণ লিংকগুলো ইন্টারসেপ্ট করা
+        // লিংক ক্লিক করলে রিফ্রেশ ছাড়া পেজ চেঞ্জ হওয়া
         viewport.onload = () => {
           try {
             const doc = viewport.contentWindow.document;
