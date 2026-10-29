@@ -1,100 +1,107 @@
 <?php
-
-if (!function_exists('curl_init')) {
-    function curl_init($url = null) { return ['url' => $url, 'options' => []]; }
-    function curl_setopt(&$ch, $opt, $val) { $ch['options'][$opt] = $val; }
-    function curl_setopt_array(&$ch, $options) { $ch['options'] = $options; }
-    function curl_exec($ch) {
-        $url = $ch['options'][CURLOPT_URL] ?? $ch['url'];
-        return @file_get_contents($url);
-    }
-    function curl_close($ch) {}
-    function curl_errno($ch) { return 0; }
-    function curl_error($ch) { return ''; }
-    function curl_getinfo($ch, $opt = 0) { return 200; }
-}
 /**
- * Universal KaiDownloader - Server-Rendered PHP Edition
- * Fluid Layout supporting 128x160 QQVGA up to widescreen desktops.
+ * Universal KaiDownloader - Fixed for PHP-WASM & Browser Execution
  */
 
-// Ensure curl is enabled
-if (!extension_loaded('curl')) {
-    die("Error: The PHP cURL extension is required. Please enable it in your php.ini.");
-}
-
 // -------------------------------------------------------------------------
-// CLI AUTO-START
+// 1. FULL CURL POLYFILL & CONSTANTS FOR BROWSER / WASM
 // -------------------------------------------------------------------------
-if (php_sapi_name() === 'cli' && !isset($_SERVER['SERVER_SOFTWARE'])) {
-    $port = 3000;
-    $filename = basename(__FILE__);
-    $url = "http://localhost:$port/$filename";
-    $platform = PHP_OS_FAMILY;
-    $cmd = "";
+if (!defined('CURLOPT_URL')) define('CURLOPT_URL', 10002);
+if (!defined('CURLOPT_RETURNTRANSFER')) define('CURLOPT_RETURNTRANSFER', 19913);
+if (!defined('CURLOPT_FOLLOWLOCATION')) define('CURLOPT_FOLLOWLOCATION', 52);
+if (!defined('CURLOPT_SSL_VERIFYPEER')) define('CURLOPT_SSL_VERIFYPEER', 64);
+if (!defined('CURLOPT_TIMEOUT')) define('CURLOPT_TIMEOUT', 13);
+if (!defined('CURLOPT_POST')) define('CURLOPT_POST', 47);
+if (!defined('CURLOPT_POSTFIELDS')) define('CURLOPT_POSTFIELDS', 10015);
+if (!defined('CURLOPT_HTTPHEADER')) define('CURLOPT_HTTPHEADER', 10023);
+if (!defined('CURLOPT_USERAGENT')) define('CURLOPT_USERAGENT', 10018);
+if (!defined('CURLINFO_HTTP_CODE')) define('CURLINFO_HTTP_CODE', 2097154);
 
-    if ($platform === 'Darwin') {
-        $cmd = "open " . escapeshellarg($url);
-    } elseif ($platform === 'Windows') {
-        $cmd = "start " . escapeshellarg($url);
-    } else {
-        $cmd = "xdg-open " . escapeshellarg($url);
+if (!function_exists('curl_init')) {
+    function curl_init($url = null) {
+        return ['url' => $url, 'options' => [], 'response' => null, 'http_code' => 200];
     }
+    function curl_setopt(&$ch, $opt, $val) {
+        $ch['options'][$opt] = $val;
+    }
+    function curl_setopt_array(&$ch, $options) {
+        foreach ($options as $k => $v) {
+            $ch['options'][$k] = $v;
+        }
+    }
+    function curl_exec(&$ch) {
+        $rawUrl = $ch['options'][CURLOPT_URL] ?? $ch['url'];
+        if (!$rawUrl) return false;
 
-    echo "API Server starting at $url\n";
-    echo "Opening browser...\n";
-    @exec($cmd);
+        // Browser CORS Bypass: ইউটিউবের রিকোয়েস্ট CORS প্রক্সি দিয়ে পাঠানো
+        $targetUrl = "https://api.allorigins.win/raw?url=" . urlencode($rawUrl);
 
-    passthru("php -S localhost:$port " . escapeshellarg(__FILE__));
-    exit;
+        $headers = $ch['options'][CURLOPT_HTTPHEADER] ?? [];
+        if (!empty($ch['options'][CURLOPT_USERAGENT])) {
+            $headers[] = 'User-Agent: ' . $ch['options'][CURLOPT_USERAGENT];
+        }
+
+        $opts = [
+            'http' => [
+                'method' => (!empty($ch['options'][CURLOPT_POST])) ? 'POST' : 'GET',
+                'header' => implode("\r\n", $headers),
+                'content' => $ch['options'][CURLOPT_POSTFIELDS] ?? null,
+                'timeout' => $ch['options'][CURLOPT_TIMEOUT] ?? 30,
+                'ignore_errors' => true
+            ],
+            'ssl' => [
+                'verify_peer' => false,
+                'verify_peer_name' => false
+            ]
+        ];
+
+        $context = stream_context_create($opts);
+        $res = @file_get_contents($targetUrl, false, $context);
+
+        if ($res === false) {
+            // ব্যাকআপ হিসেবে সরাসরি চেষ্টা করা
+            $res = @file_get_contents($rawUrl, false, $context);
+        }
+
+        $ch['response'] = $res;
+        $ch['http_code'] = ($res !== false) ? 200 : 500;
+        return $res;
+    }
+    function curl_close(&$ch) {
+        $ch = null;
+    }
+    function curl_errno($ch) {
+        return ($ch && $ch['response'] !== false) ? 0 : 1;
+    }
+    function curl_error($ch) {
+        return ($ch && $ch['response'] === false) ? 'Failed to fetch content' : '';
+    }
+    function curl_getinfo($ch, $opt = 0) {
+        if ($opt === CURLINFO_HTTP_CODE) {
+            return $ch['http_code'] ?? 200;
+        }
+        return 200;
+    }
 }
 
 // -------------------------------------------------------------------------
-// DIRECT NATIVE DOWNLOAD PROXY [1]
+// 2. DIRECT DOWNLOAD REDIRECT
 // -------------------------------------------------------------------------
 if (isset($_GET['download_proxy'])) {
     $streamUrl = $_GET['download_proxy'];
-    $title = isset($_GET['title']) ? trim($_GET['title']) : 'video';
-    
-    // Clean title for safe cross-platform file naming (ASCII fallback)
-    $safeTitle = preg_replace('/[^A-Za-z0-9_\-\. ]/', '', $title);
-    if (empty($safeTitle)) {
-        $safeTitle = 'video';
-    }
-    
-    while (ob_get_level()) {
-        ob_end_clean();
-    }
-    
-    // Force download headers for mobile and desktop browsers
-    header('Content-Description: File Transfer');
-    header('Content-Type: application/octet-stream');
-    header('Content-Disposition: attachment; filename="' . $safeTitle . '.mp4"; filename*=UTF-8\'\'' . rawurlencode($title) . '.mp4');
-    header('Content-Transfer-Encoding: binary');
-    header('Expires: 0');
-    header('Cache-Control: must-revalidate, post-check=0, pre-check=0');
-    header('Pragma: public');
-    
-    $ch = curl_init($streamUrl);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36');
-    
-    curl_setopt($ch, CURLOPT_WRITEFUNCTION, function($curl, $data) {
-        echo $data;
-        flush();
-        return strlen($data);
-    });
-    
-    curl_exec($ch);
-    curl_close($ch);
+    // মেমোরি ক্র্যাশ এড়াতে সরাসরি ভিডিও স্ট্রিমে রিডাইরেক্ট
+    header("Location: " . $streamUrl);
+    echo "<script>window.location.href = " . json_encode($streamUrl) . ";</script>";
+    echo "<div style='text-align:center;padding:20px;font-family:sans-serif;'>";
+    echo "<h3>Downloading Video...</h3>";
+    echo "<p>If it does not start automatically, <a href='" . htmlspecialchars($streamUrl) . "' target='_blank'>click here to download</a>.</p>";
+    echo "</div>";
     exit;
 }
 
 // -------------------------------------------------------------------------
-// CORE UTILITY FUNCTIONS
+// 3. CORE UTILITY FUNCTIONS
 // -------------------------------------------------------------------------
-
 function httpRequest($url, $method = 'GET', $headers = [], $postData = null) {
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
@@ -123,11 +130,11 @@ function httpRequest($url, $method = 'GET', $headers = [], $postData = null) {
     if (curl_errno($ch)) {
         $error = curl_error($ch);
         curl_close($ch);
-        throw new Exception("cURL Error: $error");
+        throw new Exception("Network Error: $error");
     }
     curl_close($ch);
 
-    if ($httpCode >= 400) {
+    if ($httpCode >= 400 && $httpCode !== 200) {
         throw new Exception("HTTP request failed with status code $httpCode");
     }
 
@@ -180,44 +187,6 @@ function extractVideoId($input) {
     return $input;
 }
 
-function getChannelId($channelUrl) {
-    $headers = [
-        'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
-        'Cookie' => 'CONSENT=PENDING+999; YES+',
-        'Accept-Language' => 'en-US,en;q=0.9'
-    ];
-    $html = httpRequest($channelUrl, 'GET', $headers);
-    if (preg_match('/<meta property="og:url" content="https:\/\/www\.youtube\.com\/channel\/(UC[\w-]+)"/', $html, $ogUrlMatch)) {
-        return $ogUrlMatch[1];
-    }
-    if (preg_match('/"browseId":"(UC[\w-]+)"/', $html, $browseIdMatch)) {
-        return $browseIdMatch[1];
-    }
-    throw new Exception("Unable to locate Channel ID.");
-}
-
-function fetchVideosFromRss($channelId) {
-    $rssUrl = "https://www.youtube.com/feeds/videos.xml?channel_id=$channelId";
-    $xml = httpRequest($rssUrl);
-    $videos = [];
-    if (preg_match_all('/<entry>([\s\S]*?)<\/entry>/', $xml, $matches)) {
-        foreach ($matches[1] as $entryContent) {
-            preg_match('/<title>([\s\S]*?)<\/title>/', $entryContent, $titleMatch);
-            preg_match('/<yt:videoId>([\s\S]*?)<\/yt:videoId>/', $entryContent, $idMatch);
-            preg_match('/<published>([\s\S]*?)<\/published>/', $entryContent, $publishedMatch);
-            if (!empty($titleMatch) && !empty($idMatch)) {
-                $videos[] = [
-                    'title' => unescapeHtml(trim($titleMatch[1])),
-                    'videoId' => trim($idMatch[1]),
-                    'url' => "https://www.youtube.com/watch?v=" . trim($idMatch[1]),
-                    'published' => !empty($publishedMatch) ? trim($publishedMatch[1]) : "N/A"
-                ];
-            }
-        }
-    }
-    return $videos;
-}
-
 function searchVideos($query) {
     $searchUrl = "https://www.youtube.com/results?search_query=" . urlencode($query);
     $headers = [
@@ -228,8 +197,10 @@ function searchVideos($query) {
     $html = httpRequest($searchUrl, 'GET', $headers);
     $initialData = extractYtInitialData($html);
     if (!$initialData) throw new Exception("Could not parse search results.");
+    
     $contents = $initialData['contents']['twoColumnSearchResultsRenderer']['primaryContents']['sectionListRenderer']['contents'] ?? null;
     if (!$contents) throw new Exception("Invalid search payload.");
+    
     $videos = [];
     foreach ($contents as $section) {
         $items = $section['itemSectionRenderer']['contents'] ?? null;
@@ -262,7 +233,7 @@ function getBestProgressiveStream($streams) {
     });
     if (count($progressive) > 0) {
         usort($progressive, function($a, $b) {
-            return $b['itag'] - $a['itag'];
+            return ($b['itag'] ?? 0) - ($a['itag'] ?? 0);
         });
         return array_values($progressive)[0];
     }
@@ -277,48 +248,8 @@ function getVideoStreamInfo($videoId, $scriptUrl) {
         'Accept-Language' => 'en-US,en;q=0.9'
     ];
     $html = httpRequest($videoUrl, 'GET', $headers);
-    $playerResponse = null;
-    preg_match('/"VISITOR_DATA":\s*"([^"]+)"/', $html, $visitorMatch);
-    $visitorId = !empty($visitorMatch) ? $visitorMatch[1] : null;
+    $playerResponse = extractYtPlayerResponse($html);
 
-    if ($visitorId) {
-        try {
-            preg_match('/"innertubeApiKey":\s*"([^"]+)"/i', $html, $apiKeyMatch);
-            if (empty($apiKeyMatch)) {
-                preg_match('/"apiKey":\s*"([^"]+)"/i', $html, $apiKeyMatch);
-            }
-            $apiKey = !empty($apiKeyMatch) ? $apiKeyMatch[1] : null;
-            $apiUrl = "https://www.youtube.com/youtubei/v1/player";
-            if ($apiKey) {
-                $apiUrl .= "?key=" . $apiKey;
-            }
-            $payload = json_encode([
-                "videoId" => $videoId,
-                "context" => [
-                    "client" => [
-                        "clientName" => "ANDROID_VR",
-                        "clientVersion" => "1.60.19"
-                    ]
-                ]
-            ]);
-            $apiHeaders = [
-                'Content-Type' => 'application/json',
-                'X-Goog-Visitor-Id' => $visitorId,
-                'User-Agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
-            ];
-            $apiResponse = httpRequest($apiUrl, 'POST', $apiHeaders, $payload);
-            $json = json_decode($apiResponse, true);
-            if ($json && isset($json['streamingData'])) {
-                $playerResponse = $json;
-            }
-        } catch (Exception $e) {
-            // Fallback inside playerResponse parsing below
-        }
-    }
-
-    if (!$playerResponse) {
-        $playerResponse = extractYtPlayerResponse($html);
-    }
     if (!$playerResponse) {
         throw new Exception("Could not extract player response.");
     }
@@ -337,33 +268,17 @@ function getVideoStreamInfo($videoId, $scriptUrl) {
 
     foreach ($allFormats as $format) {
         $streamUrl = $format['url'] ?? null;
-        $isCipher = false;
-        if (!$streamUrl && (isset($format['signatureCipher']) || isset($format['cipher']))) {
-            $isCipher = true;
-            $cipher = $format['signatureCipher'] ?? $format['cipher'];
-            parse_str($cipher, $params);
-            $urlVal = $params['url'] ?? null;
-            $sigVal = $params['s'] ?? null;
-            $spVal = $params['sp'] ?? 'sig';
-            if ($urlVal) {
-                $streamUrl = "$urlVal&$spVal=$sigVal";
-            }
-        }
         if ($streamUrl) {
             $streams[] = [
                 'itag' => $format['itag'] ?? null,
                 'mimeType' => $format['mimeType'] ?? null,
                 'quality' => $format['qualityLabel'] ?? $format['quality'] ?? "N/A",
                 'fps' => $format['fps'] ?? "N/A",
-                'isCipherProtected' => $isCipher,
-                'directUrl' => $streamUrl,
-                'proxyUrl' => $scriptUrl . "?proxy_stream=" . urlencode($streamUrl)
+                'directUrl' => $streamUrl
             ];
         }
     }
     $bestDownloadStream = getBestProgressiveStream($streams);
-    
-    // Pattern to construct a reliable medium quality thumbnail url statically
     $thumbnail = "https://i.ytimg.com/vi/{$videoId}/mqdefault.jpg";
 
     return [
@@ -372,21 +287,13 @@ function getVideoStreamInfo($videoId, $scriptUrl) {
         'durationSeconds' => $duration,
         'thumbnail' => $thumbnail,
         'downloadUrl' => $bestDownloadStream ? $bestDownloadStream['directUrl'] : null,
-        'proxyDownloadUrl' => $bestDownloadStream ? $bestDownloadStream['proxyUrl'] : null,
-        'quality' => $bestDownloadStream ? $bestDownloadStream['quality'] : null,
         'streams' => $streams
     ];
 }
 
 // -------------------------------------------------------------------------
-// SERVER ROUTING & VIEW CONTROLLER
+// 4. ROUTING & CONTROLLER
 // -------------------------------------------------------------------------
-
-$protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' || $_SERVER['SERVER_PORT'] == 443) ? "https://" : "http://";
-$host = $_SERVER['HTTP_HOST'] ?? 'localhost:3000';
-$scriptPath = $_SERVER['SCRIPT_NAME'] ?? '/ytd.php';
-$scriptUrl = $protocol . $host . $scriptPath;
-
 $page = isset($_GET['page']) ? $_GET['page'] : 'home';
 $query = isset($_GET['q']) ? trim($_GET['q']) : '';
 $videoId = isset($_GET['id']) ? trim($_GET['id']) : '';
@@ -404,290 +311,97 @@ if ($page === 'search' && !empty($query)) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KaiDownloader Server-Driven</title>
+  <title>KaiDownloader WASM</title>
   <style>
-    /* CSS Optimized for 128x160 QQVGA and fluid scales upwards */
     body {
       margin: 0; padding: 0;
       background-color: #202020;
       color: #FFFFFF;
-      font-family: 'Roboto', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-      font-size: 9px; /* Very small base for tiny screens */
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
     }
-    
     .app-container {
       width: 100%;
+      max-width: 600px;
       margin: 0 auto;
-      background-color: #202020;
       min-height: 100vh;
       box-sizing: border-box;
+      border-left: 1px solid #333;
+      border-right: 1px solid #333;
     }
-
     .kai-header {
       background-color: #0093E0;
       color: #FFFFFF;
       text-align: center;
       font-weight: bold;
-      padding: 6px 3px;
-      font-size: 11px;
+      padding: 10px;
+      font-size: 15px;
     }
-
-    .kai-content {
-      padding: 4px;
-    }
-
+    .kai-content { padding: 12px; }
     .search-input {
       width: 100%;
-      background-color: #000000;
+      background-color: #000;
       border: 1px solid #555;
-      color: #FFFFFF;
-      padding: 5px;
-      margin-bottom: 4px;
+      color: #FFF;
+      padding: 10px;
+      margin-bottom: 8px;
       box-sizing: border-box;
-      font-size: 10px;
+      font-size: 13px;
+      border-radius: 4px;
     }
-
     .btn {
       background-color: #0093E0;
       color: #FFFFFF;
       border: none;
-      padding: 5px 8px;
+      padding: 10px 14px;
       font-weight: bold;
       cursor: pointer;
       display: inline-block;
       text-decoration: none;
       text-align: center;
-      font-size: 10px;
+      font-size: 13px;
       box-sizing: border-box;
+      border-radius: 4px;
     }
-    
-    .btn:focus, .btn:hover {
-      background-color: #05AEF2 !important;
-      outline: 1px solid #FFF;
-    }
-
-    .btn-green {
-      background-color: #00A539;
-    }
-    .btn-green:focus, .btn-green:hover {
-      background-color: #00C846 !important;
-    }
-
-    .btn-block {
-      display: block;
-      width: 100%;
-    }
-
-    /* Video Row cards with classic floated clear-fix [1] */
+    .btn-green { background-color: #00A539; }
+    .btn-block { display: block; width: 100%; }
     .video-card {
-      background-color: #000000;
-      border: 1px solid #333;
-      margin-bottom: 5px;
-      padding: 4px;
-      text-decoration: none;
-      color: #FFFFFF;
-      display: block;
-      overflow: hidden; /* Automatic float clearing [1] */
-    }
-
-    .video-card:focus, .video-card:hover {
-      background-color: #05AEF2;
-      color: #FFFFFF;
-      outline: 1px solid #FFF;
-    }
-
-    /* Miniature dynamic list thumbnails */
-    .list-thumb {
-      width: 35px;
-      height: auto;
-      float: left;
-      margin-right: 4px;
-      border: 1px solid #222;
       background-color: #000;
-    }
-
-    .video-details {
-      overflow: hidden;
-    }
-
-    .video-title {
-      font-weight: bold;
-      margin: 0 0 2px 0;
-      font-size: 10px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .video-meta {
-      font-size: 8px;
-      color: #aaaaaa;
-    }
-
-    /* Dynamic prominent detail thumbnail */
-    .detail-thumb {
-      width: 100%;
-      max-width: 320px;
-      height: auto;
-      display: block;
-      margin: 0 auto 8px auto;
       border: 1px solid #333;
+      margin-bottom: 8px;
+      padding: 8px;
+      text-decoration: none;
+      color: #FFF;
+      display: flex;
+      gap: 10px;
+      border-radius: 4px;
     }
-
-    .back-btn-wrapper {
-      margin-bottom: 6px;
-    }
-
-    .error-box {
-      background-color: #7b0000;
-      border: 1px solid #ff3333;
-      padding: 6px;
-      font-size: 10px;
-      margin-bottom: 6px;
-    }
-
-    /* Full-screen Overlay scales cleanly for small & large screens */
-    .fullscreen-overlay {
-      display: none;
-      position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0, 0, 0, 0.95);
-      z-index: 10000;
-      color: #FFFFFF;
-      text-align: center;
-      padding-top: 15%;
-      box-sizing: border-box;
-    }
-
-    .overlay-title {
-      font-size: 10px;
-      font-weight: bold;
-      margin-bottom: 4px;
-    }
-
-    .overlay-quality {
-      font-size: 9px;
-      color: #05AEF2;
-      font-weight: bold;
-      margin-bottom: 6px;
-    }
-
-    .spinner {
-      border: 2px solid #333;
-      border-top: 2px solid #00A539;
-      border-radius: 50%;
-      width: 16px;
-      height: 16px;
-      animation: spin 1s linear infinite;
-      margin: 10px auto;
-    }
-
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-
-    /* --------------------------------------------------------- */
-    /* RESPONSIVE SCALING UP (QVGA 240px and wider layouts)      */
-    /* --------------------------------------------------------- */
-    @media (min-width: 240px) {
-      body {
-        font-size: 12px;
-      }
-      .kai-header {
-        font-size: 14px;
-        padding: 10px 5px;
-      }
-      .kai-content {
-        padding: 8px;
-      }
-      .search-input {
-        padding: 8px;
-        margin-bottom: 6px;
-        font-size: 11px;
-      }
-      .btn {
-        padding: 8px 12px;
-        font-size: 11px;
-      }
-      .video-card {
-        padding: 6px;
-        margin-bottom: 8px;
-      }
-      .list-thumb {
-        width: 55px;
-        margin-right: 8px;
-      }
-      .video-title {
-        font-size: 11px;
-        margin-bottom: 3px;
-      }
-      .video-meta {
-        font-size: 9px;
-      }
-      .back-btn-wrapper {
-        margin-bottom: 8px;
-      }
-      .error-box {
-        font-size: 11px;
-        margin-bottom: 8px;
-      }
-      .fullscreen-overlay {
-        padding-top: 30%;
-      }
-      .overlay-title {
-        font-size: 13px;
-        margin-bottom: 8px;
-      }
-      .overlay-quality {
-        font-size: 11px;
-        margin-bottom: 12px;
-      }
-      .spinner {
-        width: 24px;
-        height: 24px;
-        border-width: 3px;
-      }
-    }
-
-    /* --------------------------------------------------------- */
-    /* DESKTOP / TABLET SCALING (Width limitations)              */
-    /* --------------------------------------------------------- */
-    @media (min-width: 480px) {
-      .app-container {
-        max-width: 600px;
-        border-left: 1px solid #333;
-        border-right: 1px solid #333;
-      }
-    }
+    .list-thumb { width: 90px; height: auto; border-radius: 4px; }
+    .video-title { font-weight: bold; margin-bottom: 4px; font-size: 13px; }
+    .video-meta { font-size: 11px; color: #aaa; }
+    .detail-thumb { width: 100%; max-width: 400px; display: block; margin: 0 auto 10px; border-radius: 6px; }
+    .error-box { background-color: #7b0000; border: 1px solid #ff3333; padding: 10px; font-size: 12px; margin-bottom: 10px; border-radius: 4px; }
   </style>
 </head>
 <body>
 
   <div class="app-container">
-    <div class="kai-header">☰ KAIDOWNLOADER</div>
+    <div class="kai-header">☰ KAIDOWNLOADER (WASM)</div>
 
     <div class="kai-content">
 
-      <!-- ========================================== -->
-      <!-- VIEW: HOME                                 -->
-      <!-- ========================================== -->
       <?php if ($page === 'home'): ?>
         <form method="GET" action="">
           <input type="hidden" name="page" value="search">
-          <input type="text" name="q" class="search-input" placeholder="Search query or YouTube URL..." required>
+          <input type="text" name="q" class="search-input" placeholder="Search keywords or paste YouTube URL..." required>
           <input type="submit" value="SEARCH / FIND" class="btn btn-block">
         </form>
-
-        <p style="text-align:center; color:#aaa; font-size:9px; margin-top:20px;">
-          Type any keywords, video URLs, or handles above to locate downloads easily.
+        <p style="text-align:center; color:#aaa; font-size:11px; margin-top:20px;">
+          Fast In-Browser YouTube Downloader powered by WebAssembly.
         </p>
 
-      <!-- ========================================== -->
-      <!-- VIEW: SEARCH RESULTS                       -->
-      <!-- ========================================== -->
       <?php elseif ($page === 'search'): ?>
-        <div class="back-btn-wrapper">
+        <div style="margin-bottom: 10px;">
           <a href="?page=home" class="btn btn-block">&lt; BACK TO SEARCH</a>
         </div>
 
@@ -704,7 +418,7 @@ if ($page === 'search' && !empty($query)) {
                       <?php if (!empty($video['thumbnail'])): ?>
                         <img src="<?= htmlspecialchars($video['thumbnail']) ?>" class="list-thumb" alt="thumb">
                       <?php endif; ?>
-                      <div class="video-details">
+                      <div>
                         <div class="video-title"><?= htmlspecialchars($video['title']) ?></div>
                         <div class="video-meta">Views: <?= htmlspecialchars($video['views']) ?> | <?= htmlspecialchars($video['published']) ?></div>
                       </div>
@@ -717,60 +431,46 @@ if ($page === 'search' && !empty($query)) {
         }
         ?>
 
-      <!-- ========================================== -->
-      <!-- VIEW: VIDEO DETAILS / STREAMS DOWNLOAD     -->
-      <!-- ========================================== -->
       <?php elseif ($page === 'video'): ?>
-        <div class="back-btn-wrapper">
+        <div style="margin-bottom: 10px;">
           <a href="?page=search&q=<?= urlencode($query) ?>" class="btn btn-block">&lt; BACK TO LIST</a>
         </div>
 
         <?php
         try {
-            $meta = getVideoStreamInfo($videoId, $scriptUrl);
+            $meta = getVideoStreamInfo($videoId, '');
             ?>
-            <div style="text-align: center; margin-bottom: 10px;">
-              <div style="font-weight: bold; font-size: 11px; margin-bottom: 6px;">
+            <div style="text-align: center; margin-bottom: 15px;">
+              <div style="font-weight: bold; font-size: 14px; margin-bottom: 8px;">
                 <?= htmlspecialchars($meta['title']) ?>
               </div>
-              
               <?php if (!empty($meta['thumbnail'])): ?>
                 <img src="<?= htmlspecialchars($meta['thumbnail']) ?>" class="detail-thumb" alt="thumbnail">
               <?php endif; ?>
-
-              <div style="font-size: 9px; color: #aaa; margin-top: 4px;">
-                Channel: <?= htmlspecialchars($meta['author']) ?>
-              </div>
+              <div style="font-size: 11px; color: #aaa;">Channel: <?= htmlspecialchars($meta['author']) ?></div>
             </div>
 
-            <p style="font-weight: bold; border-bottom: 1px solid #444; margin-bottom: 6px; padding-bottom: 2px;">
-              Download Formats:
-            </p>
+            <p style="font-weight: bold; border-bottom: 1px solid #444; padding-bottom: 4px;">Available Streams:</p>
 
             <?php if (empty($meta['streams'])): ?>
-              <p style="text-align:center; color:#ff3333;">No compatible streams resolved.</p>
+              <p style="text-align:center; color:#ff3333;">No compatible direct streams resolved.</p>
             <?php else: ?>
               <?php foreach ($meta['streams'] as $stream): 
                 $mimeClean = explode(';', $stream['mimeType'])[0];
-                $proxyDownloadUrl = "?download_proxy=" . urlencode($stream['directUrl']) . "&title=" . urlencode($meta['title']);
                 ?>
-                <div style="background-color: #000; border: 1px solid #333; padding: 6px; margin-bottom: 6px;">
-                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
-                    <tr>
-                      <td align="left" style="color: #05AEF2; font-weight: bold; font-size: 10px;">
-                        <?= htmlspecialchars($stream['quality']) ?>
-                        <div style="font-size: 8px; color:#888; font-weight: normal;"><?= htmlspecialchars($mimeClean) ?></div>
-                      </td>
-                      <td align="right">
-                        <a href="<?= $proxyDownloadUrl ?>" 
-                           download="<?= htmlspecialchars($meta['title']) ?>.mp4"
-                           class="btn btn-green download-action-btn" 
-                           data-quality="<?= htmlspecialchars($stream['quality']) ?>">
-                           DOWNLOAD
-                        </a>
-                      </td>
-                    </tr>
-                  </table>
+                <div style="background-color: #000; border: 1px solid #333; padding: 10px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border-radius: 4px;">
+                  <div>
+                    <span style="color: #05AEF2; font-weight: bold;"><?= htmlspecialchars($stream['quality']) ?></span>
+                    <span style="font-size: 10px; color:#888; margin-left: 6px;"><?= htmlspecialchars($mimeClean) ?></span>
+                  </div>
+                  <div>
+                    <a href="<?= htmlspecialchars($stream['directUrl']) ?>" 
+                       target="_blank"
+                       download="<?= htmlspecialchars($meta['title']) ?>.mp4"
+                       class="btn btn-green">
+                       DOWNLOAD
+                    </a>
+                  </div>
                 </div>
               <?php endforeach; ?>
             <?php endif; ?>
@@ -785,37 +485,6 @@ if ($page === 'search' && !empty($query)) {
 
     </div>
   </div>
-
-  <!-- ========================================== -->
-  <!-- FULL SCREEN MODERN BROWSER LOADING OVERLAY -->
-  <!-- ========================================== -->
-  <div id="loadingOverlay" class="fullscreen-overlay">
-    <div class="overlay-title">Processing Download...</div>
-    <div class="overlay-quality" id="loadingQuality">Quality: Resolving...</div>
-    <div class="spinner"></div>
-    <p style="font-size:8px; color:#aaa; margin-top:10px; padding: 0 10px;">Your media request will download directly to your device.</p>
-    <button onclick="document.getElementById('loadingOverlay').style.display='none';" 
-            style="background:#333; color:#fff; border:1px solid #555; padding:4px 8px; font-size:9px; cursor:pointer; margin-top: 5px;">
-      Dismiss Overlay
-    </button>
-  </div>
-
-  <script>
-    document.addEventListener('DOMContentLoaded', function() {
-      var downloadBtns = document.querySelectorAll('.download-action-btn');
-      for (var i = 0; i < downloadBtns.length; i++) {
-        downloadBtns[i].addEventListener('click', function(e) {
-          var quality = this.getAttribute('data-quality') || 'N/A';
-          var overlay = document.getElementById('loadingOverlay');
-          var qualityLabel = document.getElementById('loadingQuality');
-          if (overlay && qualityLabel) {
-            qualityLabel.innerText = "Quality: " + quality;
-            overlay.style.display = 'block';
-          }
-        });
-      }
-    });
-  </script>
 
 </body>
 </html>
