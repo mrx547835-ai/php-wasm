@@ -1,0 +1,45 @@
+name: Generate htdocs File List
+
+on:
+  push:
+    paths:
+      - 'htdocs/**' # শুধুমাত্র htdocs ফোল্ডারে পরিবর্তন হলে ট্রিগার হবে
+    branches:
+      - main
+      - master
+  workflow_dispatch: # চাইলে Actions ট্যাব থেকে ম্যানুয়ালিও রান করতে পারবেন
+
+jobs:
+  build-manifest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # ফাইলে কমিট পুশ করার পারমিশন
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate files.json
+        run: |
+          python3 -c "
+          import os, json
+          file_list = []
+          for root, _, files in os.walk('htdocs'):
+              for f in files:
+                  if not f.startswith('.'): # হিডেন ফাইল (.gitkeep ইত্যাদি) বাদ দেবে
+                      rel_path = os.path.relpath(os.path.join(root, f), 'htdocs')
+                      file_list.append(rel_path.replace('\\', '/'))
+          
+          with open('files.json', 'w', encoding='utf-8') as out:
+              json.dump(sorted(file_list), out, indent=2)
+          "
+          echo "Generated files.json successfully:"
+          cat files.json
+
+      - name: Commit and Push files.json
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add files.json
+          # ফাইল পরিবর্তন হলেই কেবল কমিট হবে, না হলে কিছু করবে না
+          git diff --staged --quiet || (git commit -m "Auto-generate files.json [skip ci]" && git push)
