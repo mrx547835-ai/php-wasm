@@ -7,13 +7,13 @@ on:
     branches:
       - main
       - master
-  workflow_dispatch: # চাইলে Actions ট্যাব থেকে ম্যানুয়ালিও রান করতে পারবেন
+  workflow_dispatch: # Actions ট্যাব থেকে ম্যানুয়ালিও রান করা যাবে
 
 jobs:
   build-manifest:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # ফাইলে কমিট পুশ করার পারমিশন
+      contents: write
 
     steps:
       - name: Checkout Repository
@@ -21,18 +21,10 @@ jobs:
 
       - name: Generate files.json
         run: |
-          python3 -c "
-          import os, json
-          file_list = []
-          for root, _, files in os.walk('htdocs'):
-              for f in files:
-                  if not f.startswith('.'): # হিডেন ফাইল (.gitkeep ইত্যাদি) বাদ দেবে
-                      rel_path = os.path.relpath(os.path.join(root, f), 'htdocs')
-                      file_list.append(rel_path.replace('\\', '/'))
-          
-          with open('files.json', 'w', encoding='utf-8') as out:
-              json.dump(sorted(file_list), out, indent=2)
-          "
+          cd htdocs
+          # htdocs এর ভেতরের সব ফাইল খুঁজে JSON অ্যারে বানানো
+          find . -type f ! -path '*/.*' | sed 's|^\./||' | sort | jq -R . | jq -s . > ../files.json
+          cd ..
           echo "Generated files.json successfully:"
           cat files.json
 
@@ -41,5 +33,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add files.json
-          # ফাইল পরিবর্তন হলেই কেবল কমিট হবে, না হলে কিছু করবে না
           git diff --staged --quiet || (git commit -m "Auto-generate files.json [skip ci]" && git push)
